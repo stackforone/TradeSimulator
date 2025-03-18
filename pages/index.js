@@ -37,6 +37,10 @@ i18n.use(initReactI18next).init({
         depthChart: 'Depth Chart',
         pnl: 'กำไรและขาดทุน (PNL)',
         riskManagement: 'การจัดการความเสี่ยง',
+        market: 'Market',
+        limit: 'Limit',
+        openOrders: 'คำสั่งที่รอ',
+        cancel: 'ยกเลิก',
       },
     },
   },
@@ -98,18 +102,24 @@ export default function Home() {
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const storedBalance = localStorage.getItem('balance');
+      const storedMarginBalance = localStorage.getItem('marginBalance');
       const storedTradeHistory = localStorage.getItem('tradeHistory');
+      const storedOpenOrders = localStorage.getItem('openOrders');
       if (storedBalance) setBalance(parseFloat(storedBalance));
+      if (storedMarginBalance) setMarginBalance(parseFloat(storedMarginBalance));
       if (storedTradeHistory) setTradeHistory(JSON.parse(storedTradeHistory));
+      if (storedOpenOrders) setOpenOrders(JSON.parse(storedOpenOrders));
     }
   }, []);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
       localStorage.setItem('balance', balance);
+      localStorage.setItem('marginBalance', marginBalance);
       localStorage.setItem('tradeHistory', JSON.stringify(tradeHistory));
+      localStorage.setItem('openOrders', JSON.stringify(openOrders));
     }
-  }, [balance, tradeHistory]);
+  }, [balance, marginBalance, tradeHistory, openOrders]);
 
   // Generate price history
   useEffect(() => {
@@ -165,7 +175,20 @@ export default function Home() {
             formattedDate: now.toLocaleDateString([], { month: 'short', day: 'numeric' }),
           });
 
-          // Check open orders
+          // Check alerts
+          alerts.forEach((alert, index) => {
+            if (alert.cryptoId === crypto.id) {
+              if (alert.direction === 'above' && newPrice >= alert.targetPrice) {
+                toast.success(`${crypto.name} ถึงราคา ${formatCurrency(newPrice)}! ${t('above')} ${formatCurrency(alert.targetPrice)}`);
+                removeAlert(index);
+              } else if (alert.direction === 'below' && newPrice <= alert.targetPrice) {
+                toast.success(`${crypto.name} ถึงราคา ${formatCurrency(newPrice)}! ${t('below')} ${formatCurrency(alert.targetPrice)}`);
+                removeAlert(index);
+              }
+            }
+          });
+
+          // Check open orders with Stop-Loss and Take-Profit
           openOrders.forEach((order, index) => {
             if (order.crypto === crypto.symbol) {
               if (order.type === 'buy' && order.price >= newPrice) {
@@ -173,6 +196,13 @@ export default function Home() {
                 setOpenOrders(prev => prev.filter((_, i) => i !== index));
               } else if (order.type === 'sell' && order.price <= newPrice) {
                 executeOrder(order);
+                setOpenOrders(prev => prev.filter((_, i) => i !== index));
+              }
+              if (order.stopLoss && newPrice <= order.stopLoss) {
+                executeOrder({ ...order, price: newPrice, type: 'sell' });
+                setOpenOrders(prev => prev.filter((_, i) => i !== index));
+              } else if (order.takeProfit && newPrice >= order.takeProfit) {
+                executeOrder({ ...order, price: newPrice, type: 'sell' });
                 setOpenOrders(prev => prev.filter((_, i) => i !== index));
               }
             }
@@ -200,7 +230,7 @@ export default function Home() {
       setOrderBook({ bids, asks });
     }, 5000);
     return () => clearInterval(interval);
-  }, [selectedCrypto, openOrders, tradeHistory]);
+  }, [selectedCrypto, openOrders, tradeHistory, alerts, t]);
 
   // Functions
   const setPriceAlert = (cryptoId, targetPrice, direction) => {
@@ -210,6 +240,7 @@ export default function Home() {
     }
     setAlerts(prev => [...prev, { cryptoId, targetPrice: parseFloat(targetPrice), direction }]);
     toast.success('ตั้งค่าการแจ้งเตือนสำเร็จ!');
+    setAlertPrice('');
   };
 
   const removeAlert = (index) => {
@@ -227,6 +258,10 @@ export default function Home() {
     const amount = type === 'buy' ? parseFloat(buyAmount) : parseFloat(sellAmount);
     if (!amount || isNaN(amount) || amount <= 0) {
       toast.error('กรุณากรอกจำนวนที่ถูกต้อง');
+      return;
+    }
+    if (orderType === 'limit' && (!limitPrice || parseFloat(limitPrice) <= 0)) {
+      toast.error('กรุณากรอกราคา Limit ที่ถูกต้อง');
       return;
     }
 
@@ -304,12 +339,18 @@ export default function Home() {
     order.type === 'buy' ? buySound.play() : sellSound.play();
   };
 
+  const cancelOrder = (index) => {
+    setOpenOrders(prev => prev.filter((_, i) => i !== index));
+    toast.success('ยกเลิกคำสั่งสำเร็จ');
+  };
+
   const checkMarginLiquidation = () => {
     const portfolioValue = cryptos.reduce((total, c) => total + c.owned * c.price, 0);
-    if (tradingMode === 'margin' && portfolioValue < marginBalance * 0.1) {
+    if ((tradingMode === 'margin' || tradingMode === 'futures') && portfolioValue < marginBalance * 0.1) {
       toast.error('Margin Call! พอร์ตถูกล้าง');
       setMarginBalance(0);
       setCryptos(prev => prev.map(c => ({ ...c, owned: 0 })));
+      setOpenOrders([]);
     }
   };
 
@@ -352,7 +393,7 @@ export default function Home() {
 
   return (
     <div className={`min-h-screen ${theme === 'dark' ? 'bg-gradient-to-br from-gray-900 to-gray-800 text-white' : 'bg-gradient-to-br from-gray-100 to-gray-200 text-gray-900'} font-sans overflow-x-hidden`}>
-      <Toaster position="top-right" toastOptions={{ duration: 5000, className: 'glass-toast' }} />
+      <Toaster position="top-right" toastOptions={{ duration: 5000, className: 'glass-toast bg-gray-800/90 text-white border border-gray-700 shadow-lg rounded-lg' }} />
 
       {/* Header */}
       <motion.header
@@ -361,34 +402,34 @@ export default function Home() {
         transition={{ type: 'spring', stiffness: 120, damping: 20 }}
         className="fixed top-0 left-0 right-0 glass-card py-3 px-4 z-50 shadow-lg bg-gradient-to-r from-gray-900/90 via-gray-800/90 to-gray-900/90"
       >
-        <div className="container mx-auto flex flex-col sm:flex-row justify-between items-center gap-1 sm:gap-0">
+        <div className="container mx-auto flex flex-col sm:flex-row justify-between items-center gap-2 sm:gap-0">
           <motion.h1 whileHover={{ scale: 1.05 }} className="text-lg sm:text-xl font-extrabold flex items-center bg-clip-text text-transparent bg-gradient-to-r from-blue-500 to-purple-500">
             <ChartBarIcon className="h-5 w-5 sm:h-6 sm:w-6 mr-2" />
             Simulator
           </motion.h1>
           <div className="flex flex-wrap items-center justify-center gap-2 sm:gap-3">
-            <motion.div whileHover={{ scale: 1.05 }} className="glass-card px-2 py-1 sm:px-3 sm:py-1.5 flex items-center rounded-full bg-gradient-to-r from-green-500/20 to-green-600/20">
-              <WalletIcon className="h-4 w-4 sm:h-5 sm:w-5 mr-1 sm:mr-2 text-green-400" />
-              <span className="text-sm sm:text-base font-semibold">{formatCurrency(balance)}</span>
+            <motion.div whileHover={{ scale: 1.05 }} className="glass-card px-3 py-1.5 flex items-center rounded-full bg-gradient-to-r from-green-500/20 to-green-600/20">
+              <WalletIcon className="h-5 w-5 mr-2 text-green-400" />
+              <span className="text-base font-semibold">{formatCurrency(balance)}</span>
             </motion.div>
-            {tradingMode !== 'spot' && (
-              <motion.div whileHover={{ scale: 1.05 }} className="glass-card px-2 py-1 sm:px-3 sm:py-1.5 flex items-center rounded-full bg-gradient-to-r from-yellow-500/20 to-yellow-600/20">
-                <WalletIcon className="h-4 w-4 sm:h-5 sm:w-5 mr-1 sm:mr-2 text-yellow-400" />
-                <span className="text-sm sm:text-base font-semibold">{formatCurrency(marginBalance)} (Margin)</span>
+            {(tradingMode === 'margin' || tradingMode === 'futures') && (
+              <motion.div whileHover={{ scale: 1.05 }} className="glass-card px-3 py-1.5 flex items-center rounded-full bg-gradient-to-r from-yellow-500/20 to-yellow-600/20">
+                <WalletIcon className="h-5 w-5 mr-2 text-yellow-400" />
+                <span className="text-base font-semibold">{formatCurrency(marginBalance)} (Margin)</span>
               </motion.div>
             )}
-            <motion.div whileHover={{ scale: 1.05 }} className="glass-card px-2 py-1 sm:px-3 sm:py-1.5 flex items-center rounded-full bg-gradient-to-r from-blue-500/20 to-blue-600/20">
-              <CurrencyDollarIcon className="h-4 w-4 sm:h-5 sm:w-5 mr-1 sm:mr-2 text-blue-400" />
-              <span className="text-sm sm:text-base font-semibold">{formatCurrency(portfolioValue)}</span>
+            <motion.div whileHover={{ scale: 1.05 }} className="glass-card px-3 py-1.5 flex items-center rounded-full bg-gradient-to-r from-blue-500/20 to-blue-600/20">
+              <CurrencyDollarIcon className="h-5 w-5 mr-2 text-blue-400" />
+              <span className="text-base font-semibold">{formatCurrency(portfolioValue)}</span>
             </motion.div>
-            <motion.button whileHover={{ rotate: 180, scale: 1.1 }} whileTap={{ scale: 0.95 }} onClick={toggleTheme} className="glass-card p-1.5 sm:p-2 rounded-full bg-gradient-to-r from-gray-700/50 to-gray-600/50">
+            <motion.button whileHover={{ rotate: 180, scale: 1.1 }} whileTap={{ scale: 0.95 }} onClick={toggleTheme} className="glass-card p-2 rounded-full bg-gradient-to-r from-gray-700/50 to-gray-600/50">
               {theme === 'dark' ? '☀️' : '🌙'}
             </motion.button>
-            <div className="flex space-x-1 sm:space-x-2">
-              <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.95 }} onClick={() => i18n.changeLanguage('en')} className="glass-card px-2 py-1 sm:px-2.5 sm:py-1 rounded-full text-xs sm:text-sm bg-gradient-to-r from-blue-500/30 to-blue-600/30">
+            <div className="flex space-x-2">
+              <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.95 }} onClick={() => i18n.changeLanguage('en')} className="glass-card px-2.5 py-1 rounded-full text-sm bg-gradient-to-r from-blue-500/30 to-blue-600/30">
                 EN
               </motion.button>
-              <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.95 }} onClick={() => i18n.changeLanguage('th')} className="glass-card px-2 py-1 sm:px-2.5 sm:py-1 rounded-full text-xs sm:text-sm bg-gradient-to-r from-purple-500/30 to-purple-600/30">
+              <motion.button whileHover={{ scale: 1.1 }} whileTap={{ scale: 0.95 }} onClick={() => i18n.changeLanguage('th')} className="glass-card px-2.5 py-1 rounded-full text-sm bg-gradient-to-r from-purple-500/30 to-purple-600/30">
                 TH
               </motion.button>
             </div>
@@ -397,15 +438,17 @@ export default function Home() {
       </motion.header>
 
       {/* Main Content */}
-      <main className="container mx-auto pt-20 sm:pt-24 p-6">
+      <main className="container mx-auto pt-24 p-6">
         {/* Trading Mode Selector */}
         <div className="flex justify-center mb-6">
-          <div className="glass-card rounded-lg overflow-hidden flex">
+          <div className="glass-card rounded-lg overflow-hidden flex shadow-md">
             {['spot', 'margin', 'futures'].map(mode => (
               <motion.button
                 key={mode}
                 whileHover={{ scale: 1.05 }}
-                className={`px-4 py-2 text-md font-medium ${tradingMode === mode ? 'bg-gradient-to-r from-blue-600 to-purple-600 text-white' : 'text-gray-300 hover:bg-gray-600'}`}
+                className={`px-6 py-3 text-md font-medium transition-colors duration-300 ${
+                  tradingMode === mode ? 'bg-gradient-to-r from-blue-600 to-purple-600 text-white' : 'text-gray-300 hover:bg-gray-700/50'
+                }`}
                 onClick={() => setTradingMode(mode)}
               >
                 {t(mode)}
@@ -418,7 +461,7 @@ export default function Home() {
           {/* Crypto List */}
           <motion.div initial={{ opacity: 0, x: -50 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.2 }} className="glass-card rounded-xl p-6 shadow-xl">
             <h2 className="text-2xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">{t('portfolio')}</h2>
-            <div className="space-y-4">
+            <div className="space-y-4 max-h-[calc(100vh-200px)] overflow-y-auto">
               <AnimatePresence>
                 {cryptos.map(crypto => (
                   <motion.div
@@ -428,7 +471,7 @@ export default function Home() {
                     exit={{ opacity: 0, y: -20 }}
                     transition={{ duration: 0.3 }}
                     className={`glass-card p-4 rounded-lg cursor-pointer hover:shadow-lg transition-all duration-300 ${
-                      selectedCrypto.id === crypto.id ? 'bg-gradient-to-r from-blue-500 to-purple-600 shadow-md border-2 border-blue-400 text-white' : 'hover:bg-gradient-to-r hover:from-gray-700 hover:to-gray-600 text-gray-300'
+                      selectedCrypto.id === crypto.id ? 'bg-gradient-to-r from-blue-500 to-purple-600 shadow-md border-2 border-blue-400 text-white' : 'hover:bg-gray-700/50 text-gray-300'
                     }`}
                     onClick={() => setSelectedCrypto(crypto)}
                   >
@@ -470,12 +513,14 @@ export default function Home() {
                   </div>
                   <p className="text-md mt-1">{t('trend')}: <span className={getTrend(selectedCrypto.history) === 'ขาขึ้น' ? 'text-green-400' : 'text-red-400'}>{getTrend(selectedCrypto.history)}</span></p>
                 </div>
-                <div className="flex glass-card rounded-lg overflow-hidden">
+                <div className="flex glass-card rounded-lg overflow-hidden shadow-md">
                   {['1H', '1D', '1W', '1M'].map(tf => (
                     <motion.button
                       key={tf}
                       whileHover={{ scale: 1.05 }}
-                      className={`px-4 py-2 text-md font-medium ${timeframe === tf ? 'bg-gradient-to-r from-blue-600 to-purple-600 text-white' : 'text-gray-300 hover:bg-gray-600'}`}
+                      className={`px-4 py-2 text-md font-medium transition-colors duration-300 ${
+                        timeframe === tf ? 'bg-gradient-to-r from-blue-600 to-purple-600 text-white' : 'text-gray-300 hover:bg-gray-700/50'
+                      }`}
                       onClick={() => setTimeframe(tf)}
                     >
                       {tf}
@@ -489,13 +534,15 @@ export default function Home() {
                     <CartesianGrid strokeDasharray="3 3" stroke="rgba(255, 255, 255, 0.1)" />
                     <XAxis dataKey="time" tick={{ fill: '#D1D5DB', fontSize: 12 }} axisLine={{ stroke: 'rgba(255, 255, 255, 0.2)' }} />
                     <YAxis tick={{ fill: '#D1D5DB', fontSize: 12 }} axisLine={{ stroke: 'rgba(255, 255, 255, 0.2)' }} domain={['dataMin', 'dataMax']} tickFormatter={(value) => formatCurrency(value).replace('฿', '')} />
-                    <Tooltip contentStyle={{ background: 'rgba(31, 41, 55, 0.9)', border: 'none', borderRadius: '8px', color: '#fff' }} formatter={(value) => [formatCurrency(value), 'Price']} labelFormatter={(label) => `Time: ${label}`} />
+                    <Tooltip
+                      contentStyle={{ background: 'rgba(31, 41, 55, 0.9)', border: 'none', borderRadius: '8px', color: '#fff' }}
+                      formatter={(value) => [formatCurrency(value), 'Price']}
+                      labelFormatter={(label) => `Time: ${label}`}
+                    />
                     {comparedCryptos.length > 0 ? (
                       comparedCryptos.map((cryptoId, index) => {
                         const crypto = cryptos.find(c => c.id === cryptoId);
-                        return (
-                          <Line key={crypto.id} type="monotone" dataKey={crypto.symbol} stroke={['#3B82F6', '#FBBF24', '#EF4444'][index]} dot={false} strokeWidth={2} />
-                        );
+                        return <Line key={crypto.id} type="monotone" dataKey={crypto.symbol} stroke={['#3B82F6', '#FBBF24', '#EF4444'][index]} dot={false} strokeWidth={2} />;
                       })
                     ) : (
                       <Line type="monotone" dataKey="price" stroke="#3B82F6" dot={false} strokeWidth={2} />
@@ -503,7 +550,7 @@ export default function Home() {
                   </LineChart>
                 </ResponsiveContainer>
               </motion.div>
-              <div className="flex items-center space-x-2 text-sm text-gray-300">
+              <div className="flex items-center space-x-2 text-sm text-gray-400">
                 <ArrowPathIcon className="h-4 w-4 animate-spin-slow" />
                 <span>อัปเดตอัตโนมัติทุกๆ 5 วินาที</span>
               </div>
@@ -514,12 +561,18 @@ export default function Home() {
               <motion.div initial={{ opacity: 0, x: 50 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.4 }} className="glass-card rounded-xl p-6 shadow-xl">
                 <h3 className="text-2xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-green-400 to-green-600">{t('buy')} {selectedCrypto.symbol}</h3>
                 <div className="space-y-4">
-                  {tradingMode !== 'spot' && (
+                  {(tradingMode === 'margin' || tradingMode === 'futures') && (
                     <div>
                       <label className="block text-md font-medium text-gray-200 mb-2">Leverage</label>
-                      <select value={leverage} onChange={(e) => setLeverage(parseInt(e.target.value))} className="w-full glass-input py-3 px-4 rounded-lg">
-                        {[1, 2, 5, 10].map(l => (
-                          <option key={l} value={l}>{l}x</option>
+                      <select
+                        value={leverage}
+                        onChange={(e) => setLeverage(parseInt(e.target.value))}
+                        className="w-full glass-input py-3 px-4 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-green-500 transition-all duration-300"
+                      >
+                        {[1, 2, 5, 10, 20].map(l => (
+                          <option key={l} value={l} className="bg-gray-800 text-white">
+                            {l}x
+                          </option>
                         ))}
                       </select>
                     </div>
@@ -532,63 +585,89 @@ export default function Home() {
                         type="number"
                         value={buyAmount}
                         onChange={(e) => setBuyAmount(e.target.value)}
-                        className="w-full glass-input py-3 px-10 rounded-lg focus:ring-2 focus:ring-green-500 transition-all duration-300"
+                        className="w-full glass-input py-3 px-10 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-green-500 transition-all duration-300"
                         placeholder="0.00"
                       />
                     </div>
                   </div>
                   <div>
                     <label className="block text-md font-medium text-gray-200 mb-2">ประเภทคำสั่ง</label>
-                    <select value={orderType} onChange={(e) => setOrderType(e.target.value)} className="w-full glass-input py-3 px-4 rounded-lg">
-                      <option value="market">Market</option>
-                      <option value="limit">Limit</option>
+                    <select
+                      value={orderType}
+                      onChange={(e) => setOrderType(e.target.value)}
+                      className="w-full glass-input py-3 px-4 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-green-500 transition-all duration-300"
+                    >
+                      <option value="market" className="bg-gray-800 text-white">{t('market')}</option>
+                      <option value="limit" className="bg-gray-800 text-white">{t('limit')}</option>
                     </select>
                   </div>
                   {orderType === 'limit' && (
                     <div>
                       <label className="block text-md font-medium text-gray-200 mb-2">ราคา Limit (USD)</label>
-                      <input
-                        type="number"
-                        value={limitPrice}
-                        onChange={(e) => setLimitPrice(e.target.value)}
-                        className="w-full glass-input py-3 px-4 rounded-lg"
-                        placeholder="0.00"
-                      />
+                      <div className="relative">
+                        <span className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400">$</span>
+                        <input
+                          type="number"
+                          value={limitPrice}
+                          onChange={(e) => setLimitPrice(e.target.value)}
+                          className="w-full glass-input py-3 px-10 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-green-500 transition-all duration-300"
+                          placeholder="0.00"
+                        />
+                      </div>
                     </div>
                   )}
                   <div>
                     <label className="block text-md font-medium text-gray-200 mb-2">Stop-Loss (USD)</label>
-                    <input
-                      type="number"
-                      value={stopLoss}
-                      onChange={(e) => setStopLoss(e.target.value)}
-                      className="w-full glass-input py-3 px-4 rounded-lg"
-                      placeholder="0.00"
-                    />
+                    <div className="relative">
+                      <span className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400">$</span>
+                      <input
+                        type="number"
+                        value={stopLoss}
+                        onChange={(e) => setStopLoss(e.target.value)}
+                        className="w-full glass-input py-3 px-10 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-green-500 transition-all duration-300"
+                        placeholder="0.00"
+                      />
+                    </div>
                   </div>
                   <div>
                     <label className="block text-md font-medium text-gray-200 mb-2">Take-Profit (USD)</label>
-                    <input
-                      type="number"
-                      value={takeProfit}
-                      onChange={(e) => setTakeProfit(e.target.value)}
-                      className="w-full glass-input py-3 px-4 rounded-lg"
-                      placeholder="0.00"
-                    />
+                    <div className="relative">
+                      <span className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400">$</span>
+                      <input
+                        type="number"
+                        value={takeProfit}
+                        onChange={(e) => setTakeProfit(e.target.value)}
+                        className="w-full glass-input py-3 px-10 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-green-500 transition-all duration-300"
+                        placeholder="0.00"
+                      />
+                    </div>
                   </div>
                   <div className="flex justify-between text-md text-gray-300">
                     <span>{t('balance')}</span>
                     <span>{formatCurrency(tradingMode === 'spot' ? balance : marginBalance)}</span>
                   </div>
+                  <div className="flex space-x-2">
+                    {[25, 50, 75, 100].map(percent => (
+                      <motion.button
+                        key={percent}
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        className="flex-1 glass-card py-2 rounded-lg text-sm bg-gray-800/50 text-gray-300 hover:bg-green-600/50 transition-all duration-300"
+                        onClick={() => setBuyAmount(((tradingMode === 'spot' ? balance : marginBalance) * (percent / 100)).toFixed(2))}
+                      >
+                        {percent}%
+                      </motion.button>
+                    ))}
+                  </div>
                   <motion.button
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                     onClick={() => placeOrder('buy')}
-                    className="w-full bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white font-semibold py-3 rounded-lg transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
-                    disabled={isLoading || !buyAmount || parseFloat(buyAmount) <= 0}
+                    className="w-full bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white font-semibold py-3 rounded-lg transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
+                    disabled={isLoading || !buyAmount || parseFloat(buyAmount) <= 0 || (orderType === 'limit' && !limitPrice)}
                   >
                     {isLoading ? (
-                      <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <svg className="animate-spin h-5 w-5 text-white mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                       </svg>
@@ -602,12 +681,18 @@ export default function Home() {
               <motion.div initial={{ opacity: 0, x: 50 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.5 }} className="glass-card rounded-xl p-6 shadow-xl">
                 <h3 className="text-2xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-red-400 to-red-600">{t('sell')} {selectedCrypto.symbol}</h3>
                 <div className="space-y-4">
-                  {tradingMode !== 'spot' && (
+                  {(tradingMode === 'margin' || tradingMode === 'futures') && (
                     <div>
                       <label className="block text-md font-medium text-gray-200 mb-2">Leverage</label>
-                      <select value={leverage} onChange={(e) => setLeverage(parseInt(e.target.value))} className="w-full glass-input py-3 px-4 rounded-lg">
-                        {[1, 2, 5, 10].map(l => (
-                          <option key={l} value={l}>{l}x</option>
+                      <select
+                        value={leverage}
+                        onChange={(e) => setLeverage(parseInt(e.target.value))}
+                        className="w-full glass-input py-3 px-4 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-red-500 transition-all duration-300"
+                      >
+                        {[1, 2, 5, 10, 20].map(l => (
+                          <option key={l} value={l} className="bg-gray-800 text-white">
+                            {l}x
+                          </option>
                         ))}
                       </select>
                     </div>
@@ -618,62 +703,88 @@ export default function Home() {
                       type="number"
                       value={sellAmount}
                       onChange={(e) => setSellAmount(e.target.value)}
-                      className="w-full glass-input py-3 px-4 rounded-lg focus:ring-2 focus:ring-red-500 transition-all duration-300"
+                      className="w-full glass-input py-3 px-4 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-red-500 transition-all duration-300"
                       placeholder="0.00"
                     />
                   </div>
                   <div>
                     <label className="block text-md font-medium text-gray-200 mb-2">ประเภทคำสั่ง</label>
-                    <select value={orderType} onChange={(e) => setOrderType(e.target.value)} className="w-full glass-input py-3 px-4 rounded-lg">
-                      <option value="market">Market</option>
-                      <option value="limit">Limit</option>
+                    <select
+                      value={orderType}
+                      onChange={(e) => setOrderType(e.target.value)}
+                      className="w-full glass-input py-3 px-4 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-red-500 transition-all duration-300"
+                    >
+                      <option value="market" className="bg-gray-800 text-white">{t('market')}</option>
+                      <option value="limit" className="bg-gray-800 text-white">{t('limit')}</option>
                     </select>
                   </div>
                   {orderType === 'limit' && (
                     <div>
                       <label className="block text-md font-medium text-gray-200 mb-2">ราคา Limit (USD)</label>
-                      <input
-                        type="number"
-                        value={limitPrice}
-                        onChange={(e) => setLimitPrice(e.target.value)}
-                        className="w-full glass-input py-3 px-4 rounded-lg"
-                        placeholder="0.00"
-                      />
+                      <div className="relative">
+                        <span className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400">$</span>
+                        <input
+                          type="number"
+                          value={limitPrice}
+                          onChange={(e) => setLimitPrice(e.target.value)}
+                          className="w-full glass-input py-3 px-10 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-red-500 transition-all duration-300"
+                          placeholder="0.00"
+                        />
+                      </div>
                     </div>
                   )}
                   <div>
                     <label className="block text-md font-medium text-gray-200 mb-2">Stop-Loss (USD)</label>
-                    <input
-                      type="number"
-                      value={stopLoss}
-                      onChange={(e) => setStopLoss(e.target.value)}
-                      className="w-full glass-input py-3 px-4 rounded-lg"
-                      placeholder="0.00"
-                    />
+                    <div className="relative">
+                      <span className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400">$</span>
+                      <input
+                        type="number"
+                        value={stopLoss}
+                        onChange={(e) => setStopLoss(e.target.value)}
+                        className="w-full glass-input py-3 px-10 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-red-500 transition-all duration-300"
+                        placeholder="0.00"
+                      />
+                    </div>
                   </div>
                   <div>
                     <label className="block text-md font-medium text-gray-200 mb-2">Take-Profit (USD)</label>
-                    <input
-                      type="number"
-                      value={takeProfit}
-                      onChange={(e) => setTakeProfit(e.target.value)}
-                      className="w-full glass-input py-3 px-4 rounded-lg"
-                      placeholder="0.00"
-                    />
+                    <div className="relative">
+                      <span className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400">$</span>
+                      <input
+                        type="number"
+                        value={takeProfit}
+                        onChange={(e) => setTakeProfit(e.target.value)}
+                        className="w-full glass-input py-3 px-10 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-red-500 transition-all duration-300"
+                        placeholder="0.00"
+                      />
+                    </div>
                   </div>
                   <div className="flex justify-between text-md text-gray-300">
                     <span>มีอยู่</span>
                     <span>{formatCryptoAmount(selectedCrypto.owned)} {selectedCrypto.symbol}</span>
                   </div>
+                  <div className="flex space-x-2">
+                    {[25, 50, 75, 100].map(percent => (
+                      <motion.button
+                        key={percent}
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        className="flex-1 glass-card py-2 rounded-lg text-sm bg-gray-800/50 text-gray-300 hover:bg-red-600/50 transition-all duration-300"
+                        onClick={() => setSellAmount((selectedCrypto.owned * (percent / 100)).toFixed(8))}
+                      >
+                        {percent}%
+                      </motion.button>
+                    ))}
+                  </div>
                   <motion.button
                     whileHover={{ scale: 1.05 }}
                     whileTap={{ scale: 0.95 }}
                     onClick={() => placeOrder('sell')}
-                    className="w-full bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white font-semibold py-3 rounded-lg transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
-                    disabled={isLoading || !sellAmount || parseFloat(sellAmount) <= 0 || parseFloat(sellAmount) > selectedCrypto.owned}
+                    className="w-full bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white font-semibold py-3 rounded-lg transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
+                    disabled={isLoading || !sellAmount || parseFloat(sellAmount) <= 0 || parseFloat(sellAmount) > selectedCrypto.owned || (orderType === 'limit' && !limitPrice)}
                   >
                     {isLoading ? (
-                      <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <svg className="animate-spin h-5 w-5 text-white mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                         <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                         <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                       </svg>
@@ -687,18 +798,39 @@ export default function Home() {
 
             {/* Open Orders */}
             <motion.div initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.6 }} className="glass-card rounded-xl p-6 shadow-xl">
-              <h3 className="text-2xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">คำสั่งที่รอ</h3>
+              <h3 className="text-2xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">{t('openOrders')}</h3>
               {openOrders.length > 0 ? (
-                <div className="space-y-3">
+                <div className="space-y-3 max-h-64 overflow-y-auto">
                   {openOrders.map((order, index) => (
-                    <motion.div key={index} initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="glass-card p-3 rounded-lg flex justify-between items-center">
-                      <p>{order.type === 'buy' ? t('buy') : t('sell')} {order.crypto} - {formatCryptoAmount(order.amount)} @ {formatCurrency(order.price)}</p>
-                      <p>{order.timestamp}</p>
+                    <motion.div
+                      key={index}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="glass-card p-4 rounded-lg flex justify-between items-center bg-gray-800/50 border border-gray-700"
+                    >
+                      <div>
+                        <p className="text-md font-semibold">
+                          {order.type === 'buy' ? t('buy') : t('sell')} {order.crypto} - {formatCryptoAmount(order.amount)} @ {formatCurrency(order.price)}
+                        </p>
+                        <p className="text-sm text-gray-400">
+                          {order.stopLoss && `Stop-Loss: ${formatCurrency(order.stopLoss)} | `}
+                          {order.takeProfit && `Take-Profit: ${formatCurrency(order.takeProfit)}`}
+                          {order.timestamp}
+                        </p>
+                      </div>
+                      <motion.button
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        onClick={() => cancelOrder(index)}
+                        className="text-red-400 hover:text-red-500 font-semibold"
+                      >
+                        {t('cancel')}
+                      </motion.button>
                     </motion.div>
                   ))}
                 </div>
               ) : (
-                <p className="text-md text-gray-400">ยังไม่มีคำสั่งที่รอ</p>
+                <p className="text-md text-gray-400 text-center">ยังไม่มีคำสั่งที่รอ</p>
               )}
             </motion.div>
 
@@ -707,18 +839,18 @@ export default function Home() {
               <h3 className="text-2xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">{t('orderBook')}</h3>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <h4 className="text-md font-semibold text-green-400">Bids</h4>
+                  <h4 className="text-md font-semibold text-green-400 mb-2">Bids</h4>
                   {orderBook.bids.map((bid, i) => (
-                    <div key={i} className="flex justify-between text-sm">
+                    <div key={i} className="flex justify-between text-sm text-gray-300 py-1 hover:bg-gray-700/50 rounded">
                       <span>{formatCurrency(bid.price)}</span>
                       <span>{bid.amount.toFixed(2)}</span>
                     </div>
                   ))}
                 </div>
                 <div>
-                  <h4 className="text-md font-semibold text-red-400">Asks</h4>
+                  <h4 className="text-md font-semibold text-red-400 mb-2">Asks</h4>
                   {orderBook.asks.map((ask, i) => (
-                    <div key={i} className="flex justify-between text-sm">
+                    <div key={i} className="flex justify-between text-sm text-gray-300 py-1 hover:bg-gray-700/50 rounded">
                       <span>{formatCurrency(ask.price)}</span>
                       <span>{ask.amount.toFixed(2)}</span>
                     </div>
@@ -732,11 +864,12 @@ export default function Home() {
               <h3 className="text-2xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">{t('depthChart')}</h3>
               <ResponsiveContainer width="100%" height={200}>
                 <LineChart>
-                  <Line type="step" data={orderBook.bids} dataKey="price" stroke="#10B981" dot={false} />
-                  <Line type="step" data={orderBook.asks} dataKey="price" stroke="#EF4444" dot={false} />
-                  <XAxis dataKey="price" />
-                  <YAxis />
-                  <Tooltip />
+                  <Line type="step" data={orderBook.bids} dataKey="price" stroke="#10B981" dot={false} strokeWidth={2} />
+                  <Line type="step" data={orderBook.asks} dataKey="price" stroke="#EF4444" dot={false} strokeWidth={2} />
+                  <XAxis dataKey="price" tick={{ fill: '#D1D5DB', fontSize: 12 }} />
+                  <YAxis tick={{ fill: '#D1D5DB', fontSize: 12 }} />
+                  <Tooltip formatter={(value) => formatCurrency(value)} />
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255, 255, 255, 0.1)" />
                 </LineChart>
               </ResponsiveContainer>
             </motion.div>
@@ -744,9 +877,15 @@ export default function Home() {
             {/* PNL */}
             <motion.div initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.9 }} className="glass-card rounded-xl p-6 shadow-xl">
               <h3 className="text-2xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">{t('pnl')}</h3>
-              <div className="space-y-2">
-                <p>Realized PNL: {formatCurrency(pnl.realized)}</p>
-                <p>Unrealized PNL: {formatCurrency(pnl.unrealized)}</p>
+              <div className="space-y-2 text-md">
+                <p className="flex justify-between">
+                  <span>Realized PNL:</span>
+                  <span className={pnl.realized >= 0 ? 'text-green-400' : 'text-red-400'}>{formatCurrency(pnl.realized)}</span>
+                </p>
+                <p className="flex justify-between">
+                  <span>Unrealized PNL:</span>
+                  <span className={pnl.unrealized >= 0 ? 'text-green-400' : 'text-red-400'}>{formatCurrency(pnl.unrealized)}</span>
+                </p>
               </div>
             </motion.div>
 
@@ -758,10 +897,81 @@ export default function Home() {
                 <input
                   type="number"
                   value={riskRewardRatio}
-                  onChange={(e) => setRiskRewardRatio(parseFloat(e.target.value))}
-                  className="w-full glass-input py-3 px-4 rounded-lg"
+                  onChange={(e) => setRiskRewardRatio(Math.max(1, parseFloat(e.target.value) || 1))}
+                  className="w-full glass-input py-3 px-4 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-blue-500 transition-all duration-300"
                   placeholder="2"
+                  min="1"
+                  step="0.1"
                 />
+                <p className="text-sm text-gray-400 mt-2">กำหนดอัตราส่วนความเสี่ยงต่อผลตอบแทน (ขั้นต่ำ 1)</p>
+              </div>
+            </motion.div>
+
+            {/* Price Alerts */}
+            <motion.div initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 1.1 }} className="glass-card rounded-xl p-6 shadow-xl">
+              <h3 className="text-2xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">{t('setAlert')}</h3>
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-md font-medium text-gray-200 mb-2">{t('priceTarget')} (USD)</label>
+                  <div className="relative">
+                    <span className="absolute left-4 top-1/2 transform -translate-y-1/2 text-gray-400">$</span>
+                    <input
+                      type="number"
+                      value={alertPrice}
+                      onChange={(e) => setAlertPrice(e.target.value)}
+                      className="w-full glass-input py-3 px-10 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-blue-500 transition-all duration-300"
+                      placeholder="0.00"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-md font-medium text-gray-200 mb-2">{t('condition')}</label>
+                  <select
+                    value={alertDirection}
+                    onChange={(e) => setAlertDirection(e.target.value)}
+                    className="w-full glass-input py-3 px-4 rounded-lg bg-gray-800/50 text-white border border-gray-700 focus:ring-2 focus:ring-blue-500 transition-all duration-300"
+                  >
+                    <option value="above" className="bg-gray-800 text-white">{t('above')}</option>
+                    <option value="below" className="bg-gray-800 text-white">{t('below')}</option>
+                  </select>
+                </div>
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => setPriceAlert(selectedCrypto.id, alertPrice, alertDirection)}
+                  className="w-full bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 text-white font-semibold py-3 rounded-lg transition-all duration-300 shadow-md"
+                  disabled={!alertPrice || parseFloat(alertPrice) <= 0}
+                >
+                  {t('setAlert')}
+                </motion.button>
+              </div>
+              <div className="mt-6">
+                <h4 className="text-xl font-semibold mb-3 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">{t('alertsSet')}</h4>
+                {alerts.length > 0 ? (
+                  <div className="space-y-3 max-h-64 overflow-y-auto">
+                    {alerts.map((alert, index) => {
+                      const crypto = cryptos.find(c => c.id === alert.cryptoId);
+                      return (
+                        <motion.div
+                          key={index}
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          exit={{ opacity: 0 }}
+                          className="glass-card p-3 rounded-lg flex justify-between items-center bg-gray-800/50 border border-gray-700"
+                        >
+                          <p className="text-md">
+                            {crypto?.name} ({crypto?.symbol}): {alert.direction === 'above' ? t('above') : t('below')} {formatCurrency(alert.targetPrice)}
+                          </p>
+                          <motion.button whileHover={{ scale: 1.1 }} onClick={() => removeAlert(index)} className="text-red-400 hover:text-red-500 font-semibold">
+                            {t('cancel')}
+                          </motion.button>
+                        </motion.div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="text-md text-gray-400 text-center">{t('noAlerts')}</p>
+                )}
               </div>
             </motion.div>
           </div>
@@ -769,10 +979,10 @@ export default function Home() {
 
         {/* Portfolio and Trade History */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
-          <motion.div initial={{ opacity: 0, x: -50 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.7 }} className="glass-card rounded-xl p-6 shadow-xl flex flex-col">
+          <motion.div initial={{ opacity: 0, x: -50 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: 0.7 }} className="glass-card rounded-xl p-6 shadow-xl">
             <h2 className="text-2xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">{t('portfolio')}</h2>
-            <div className="w-full">
-              <table className="w-full min-w-[300px] table-auto">
+            <div className="overflow-y-auto max-h-80">
+              <table className="w-full table-auto">
                 <thead>
                   <tr className="text-gray-300 text-md border-b border-gray-700">
                     <th className="pb-3 text-left">Asset</th>
@@ -788,7 +998,7 @@ export default function Home() {
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
                       transition={{ delay: 0.1 * cryptos.indexOf(crypto) }}
-                      className="border-b border-gray-700 hover:bg-gradient-to-r hover:from-gray-700 hover:to-gray-600 transition-all duration-300"
+                      className="border-b border-gray-700 hover:bg-gray-700/50 transition-all duration-300"
                     >
                       <td className="py-4 flex items-center">
                         <div className="w-8 h-8 rounded-full bg-gradient-to-br from-gray-600 to-gray-800 flex items-center justify-center text-md font-bold text-white mr-3">
@@ -825,7 +1035,7 @@ export default function Home() {
             <h2 className="text-2xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">{t('tradeHistory')}</h2>
             {tradeHistory.length > 0 ? (
               <div className="overflow-y-auto max-h-80">
-                <table className="w-full">
+                <table className="w-full table-auto">
                   <thead>
                     <tr className="text-gray-300 text-md border-b border-gray-700">
                       <th className="pb-3 text-left">ประเภท</th>
@@ -842,7 +1052,7 @@ export default function Home() {
                         initial={{ opacity: 0 }}
                         animate={{ opacity: 1 }}
                         transition={{ delay: 0.1 * index }}
-                        className="border-b border-gray-700 hover:bg-gradient-to-r hover:from-gray-700 hover:to-gray-600 transition-all duration-300"
+                        className="border-b border-gray-700 hover:bg-gray-700/50 transition-all duration-300"
                       >
                         <td className="py-4">
                           <span className={`px-3 py-1 rounded-full text-sm font-medium ${trade.type === t('buy') ? 'bg-green-500/20 text-green-400' : 'bg-red-500/20 text-red-400'}`}>
@@ -870,9 +1080,15 @@ export default function Home() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
           <motion.div initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.9 }} className="glass-card rounded-xl p-6 shadow-xl">
             <h2 className="text-2xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">{t('news')}</h2>
-            <div className="space-y-4">
+            <div className="space-y-4 max-h-80 overflow-y-auto">
               {news.map((article, index) => (
-                <motion.div key={index} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 * index }} className="border-b border-gray-700 pb-4">
+                <motion.div
+                  key={index}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: 0.1 * index }}
+                  className="border-b border-gray-700 pb-4"
+                >
                   <a href={article.url} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300 text-md font-semibold transition-colors duration-300">
                     {article.title}
                   </a>
@@ -884,9 +1100,15 @@ export default function Home() {
 
           <motion.div initial={{ opacity: 0, y: 50 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 1.0 }} className="glass-card rounded-xl p-6 shadow-xl">
             <h2 className="text-2xl font-bold mb-4 bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-purple-500">{t('ranking')}</h2>
-            <div className="space-y-4">
+            <div className="space-y-4 max-h-80 overflow-y-auto">
               {leaderboard.map((user, index) => (
-                <motion.div key={index} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 * index }} className="flex justify-between items-center border-b border-gray-700 pb-2">
+                <motion.div
+                  key={index}
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ delay: 0.1 * index }}
+                  className="flex justify-between items-center border-b border-gray-700 pb-2"
+                >
                   <span className="text-md">{index + 1}. {user.name}</span>
                   <span className="text-md">{formatCurrency(user.portfolioValue)}</span>
                 </motion.div>
@@ -897,7 +1119,7 @@ export default function Home() {
       </main>
 
       {/* Footer */}
-      <motion.footer initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.1 }} className="glass-card p-4 mt-6">
+      <motion.footer initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 1.1 }} className="glass-card p-4 mt-6 bg-gradient-to-r from-gray-900/90 to-gray-800/90">
         <div className="container mx-auto text-center text-gray-300 text-md">
           <p>CryptoTrade Simulator จำลองการซื้อขาย {new Date().getFullYear()}</p>
           <p className="mt-1">นี่เป็นแพลตฟอร์มการซื้อขายจำลองเพื่อวัตถุประสงค์ทางการศึกษาเท่านั้น</p>
